@@ -9,6 +9,8 @@ CONFIG_DIR="$HOME/.config/role_script_ssh"
 CONFIG_FILE="$CONFIG_DIR/connection.conf"
 KNOWN_HOSTS_FILE="$CONFIG_DIR/temp_known_hosts"
 LAB_PASSWORD="student"
+SSH_CONFIG_FILE="$HOME/.ssh/config"
+CURSOR_HOST_NAME="lab-workstation"
 
 # SSH options for non-interactive connections
 SSH_OPTIONS=(
@@ -110,12 +112,18 @@ setup_key() {
     # Create .ssh directory if it doesn't exist
     mkdir -p "$HOME/.ssh"
     
-    # Move key if it exists in Downloads
-    if [[ -f "$SSH_KEY_SOURCE" ]]; then
-        mv "$SSH_KEY_SOURCE" "$SSH_KEY_DEST"
+    # Check if key already exists in destination
+    if [[ -f "$SSH_KEY_DEST" ]]; then
+        echo "SSH key already exists at $SSH_KEY_DEST"
+        chmod "$REQUIRED_PERMISSIONS" "$SSH_KEY_DEST"
     else
-        echo "Error: SSH key not found at $SSH_KEY_SOURCE"
-        return 1
+        # Move key if it exists in Downloads
+        if [[ -f "$SSH_KEY_SOURCE" ]]; then
+            mv "$SSH_KEY_SOURCE" "$SSH_KEY_DEST"
+        else
+            echo "Error: SSH key not found at $SSH_KEY_SOURCE"
+            return 1
+        fi
     fi
     
     # Set correct permissions
@@ -147,15 +155,44 @@ parse_connection_string() {
 }
 
 ensure_ssh_agent() {
-    # Start ssh-agent if not running
+    # Start ssh-agent if not running and set environment
     if ! pgrep -u "$USER" ssh-agent >/dev/null; then
         eval "$(ssh-agent -s)" >/dev/null
+    else
+        # If agent is running but environment isn't set, try to set it
+        if [[ -z "$SSH_AGENT_PID" ]]; then
+            SSH_AGENT_SOCK=$(find /tmp -uid $(id -u) -type s -name agent.\* 2>/dev/null | head -n 1)
+            if [[ -n "$SSH_AGENT_SOCK" ]]; then
+                export SSH_AUTH_SOCK="$SSH_AGENT_SOCK"
+                SSH_AGENT_PID=$(ps -u "$USER" | grep ssh-agent | awk '{print $1}')
+                export SSH_AGENT_PID
+            else
+                # If we can't find existing agent, start a new one
+                eval "$(ssh-agent -s)" >/dev/null
+            fi
+        fi
+    fi
+    
+    # Check if the key exists and has correct permissions
+    if ! check_key_exists; then
+        echo "SSH key not found at $SSH_KEY_DEST"
+        return 1
+    fi
+    
+    if ! check_key_permissions; then
+        echo "Fixing SSH key permissions..."
+        chmod "$REQUIRED_PERMISSIONS" "$SSH_KEY_DEST"
     fi
     
     # Add key if not already added
     if ! ssh-add -l 2>/dev/null | grep -q "$SSH_KEY_DEST"; then
-        ssh-add "$SSH_KEY_DEST" 2>/dev/null
+        if ! ssh-add "$SSH_KEY_DEST" 2>/dev/null; then
+            echo "Failed to add key to ssh-agent"
+            return 1
+        fi
     fi
+    
+    return 0
 }
 
 connect_ssh() {
@@ -296,6 +333,13 @@ COMMANDS:
         - Automatically provides lab password
         - Creates new configuration if connection string provided
     
+    cursor [connection_string]     Set up SSH key and optionally connect for Cursor IDE
+        - Moves SSH key from Downloads to ~/.ssh
+        - Sets correct permissions (600)
+        - Adds key to ssh-agent
+        - Stores connection details if provided
+        - Optionally connects immediately
+    
     clean                        Clean up all configuration
         - Removes SSH key from agent
         - Removes key file from ~/.ssh
@@ -344,6 +388,184 @@ NOTES:
 EOF
 }
 
+validate_ssh_config() {
+    local jump_host="$1"
+    local jump_port="$2"
+    local target_host="$3"
+    local target_port="$4"
+    
+    if [[ ! -f "$SSH_CONFIG_FILE" ]]; then
+        return 0
+    fi
+    
+    # Check if the host is already configured
+    if grep -q "^Host $CURSOR_HOST_NAME\$" "$SSH_CONFIG_FILE"; then
+        local config_jump_host=$(awk -v RS='' '/^Host '"$CURSOR_HOST_NAME"'$/ {
+            while(getline) {
+                if ($1 == "ProxyJump") {
+                    split($2, a, "[:]")
+                    print a[1]
+                    exit
+                }
+            }
+        }' "$SSH_CONFIG_FILE")
+        
+        local config_target_host=$(awk -v RS='' '/^Host '"$CURSOR_HOST_NAME"'$/ {
+            while(getline) {
+                if ($1 == "HostName") {
+                    print $2
+                    exit
+                }
+            }
+        }' "$SSH_CONFIG_FILE")
+        
+        local config_target_port=$(awk -v RS='' '/^Host '"$CURSOR_HOST_NAME"'$/ {
+            while(getline) {
+                if ($1 == "Port") {
+                    print $2
+                    exit
+                }
+            }
+        }' "$SSH_CONFIG_FILE")
+        
+        # Compare with new values
+        if [[ "$config_jump_host" != "$jump_host" ]] || \
+           [[ "$config_target_host" != "$target_host" ]] || \
+           [[ "$config_target_port" != "$target_port" ]]; then
+            echo "Warning: Existing SSH config for $CURSOR_HOST_NAME has different values."
+            echo "Existing configuration:"
+            echo "  Jump Host: $config_jump_host"
+            echo "  Target Host: $config_target_host"
+            echo "  Target Port: $config_target_port"
+            echo "New configuration:"
+            echo "  Jump Host: $jump_host"
+            echo "  Target Host: $target_host"
+            echo "  Target Port: $target_port"
+            echo "Updating configuration..."
+            return 0
+        else
+            echo "Existing SSH config matches current connection details."
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+update_ssh_config() {
+    local jump_user=$(echo "$JUMP_HOST" | cut -d@ -f1)
+    local jump_host=$(echo "$JUMP_HOST" | cut -d@ -f2)
+    local target_user=$(echo "$TARGET_HOST" | cut -d@ -f1)
+    local target_host=$(echo "$TARGET_HOST" | cut -d@ -f2)
+    
+    # Create .ssh directory if it doesn't exist
+    mkdir -p "$HOME/.ssh"
+    
+    # Create or update SSH config
+    if ! validate_ssh_config "$jump_host" "$JUMP_PORT" "$target_host" "$TARGET_PORT"; then
+        return 0
+    fi
+    
+    # Backup existing config if it exists
+    if [[ -f "$SSH_CONFIG_FILE" ]]; then
+        cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
+    fi
+    
+    # Remove existing host configuration if present
+    if [[ -f "$SSH_CONFIG_FILE" ]]; then
+        sed -i "/^Host $CURSOR_HOST_NAME$/,/^$/d" "$SSH_CONFIG_FILE"
+    fi
+    
+    # Add new configuration
+    cat >> "$SSH_CONFIG_FILE" << EOF
+
+Host jump-host
+    HostName $jump_host
+    User $jump_user
+    Port $JUMP_PORT
+    IdentityFile $SSH_KEY_DEST
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    GlobalKnownHostsFile /dev/null
+
+Host $CURSOR_HOST_NAME
+    HostName $target_host
+    User $target_user
+    Port $TARGET_PORT
+    IdentityFile $SSH_KEY_DEST
+    ProxyCommand ssh -W %h:%p jump-host
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    GlobalKnownHostsFile /dev/null
+    BatchMode yes
+
+EOF
+    
+    chmod 600 "$SSH_CONFIG_FILE"
+    echo "SSH config updated successfully."
+}
+
+setup_cursor() {
+    local conn_string="$1"
+    
+    # Ensure key exists and has correct permissions
+    if ! check_key_exists; then
+        echo "SSH key not found. Running setup first..."
+        if ! setup_key; then
+            return 1
+        fi
+    elif ! check_key_permissions; then
+        echo "Fixing SSH key permissions..."
+        chmod "$REQUIRED_PERMISSIONS" "$SSH_KEY_DEST"
+    fi
+    
+    if [[ -n "$conn_string" ]]; then
+        # If connection string provided, parse and store it
+        if ! parse_connection_string "$conn_string"; then
+            return 1
+        fi
+        store_connection_config "$conn_string"
+    else
+        # If no connection string provided, try to load from config
+        if ! load_connection_config; then
+            echo "Error: No connection string provided and no stored configuration found"
+            return 1
+        fi
+    fi
+    
+    # Update SSH config for Cursor
+    update_ssh_config
+    
+    # Test connection using the same method as connect_ssh
+    echo "Testing SSH connection..."
+    if ! connect_ssh "$conn_string"; then
+        echo "Error: Failed to connect to remote host. Please check your SSH configuration."
+        return 1
+    fi
+    
+    echo "SSH configuration has been set up for Cursor IDE."
+    echo ""
+    echo "To connect in Cursor IDE:"
+    echo "1. Click the Remote SSH button in the bottom-left corner"
+    echo "2. Select 'Connect to Host...'"
+    echo "3. Choose '$CURSOR_HOST_NAME' from the list"
+    echo ""
+    echo "Or use these settings manually:"
+    echo "  Host: $CURSOR_HOST_NAME"
+    echo "  Username: $(echo "$TARGET_HOST" | cut -d@ -f1)"
+    echo "  SSH Key: $SSH_KEY_DEST"
+    echo ""
+    
+    # Launch Cursor IDE
+    echo "Launching Cursor IDE with remote connection..."
+    cursor --remote ssh-remote+$CURSOR_HOST_NAME &
+
+    # Give instructions for manual connection if needed
+    echo ""
+    echo "If the automatic connection fails, you can connect manually:"
+    echo "1. Click the Remote SSH button (bottom-left corner)"
+}
+
 # Main command handler
 case "$1" in
     "setup")
@@ -358,6 +580,13 @@ case "$1" in
             connect_ssh
         else
             connect_ssh "$2"
+        fi
+        ;;
+    "cursor")
+        if [[ -z "$2" ]]; then
+            setup_cursor
+        else
+            setup_cursor "$2"
         fi
         ;;
     "clean")
