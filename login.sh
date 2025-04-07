@@ -536,12 +536,13 @@ setup_cursor() {
     # Update SSH config for Cursor
     update_ssh_config
     
-    # Test connection using the same method as connect_ssh
+    # Test connection using a simple connection check
     echo "Testing SSH connection..."
-    if ! connect_ssh "$conn_string"; then
+    if ! ssh -q -o BatchMode=yes -o ConnectTimeout=5 $CURSOR_HOST_NAME exit 2>/dev/null; then
         echo "Error: Failed to connect to remote host. Please check your SSH configuration."
         return 1
     fi
+    echo "SSH connection test successful."
     
     echo "SSH configuration has been set up for Cursor IDE."
     echo ""
