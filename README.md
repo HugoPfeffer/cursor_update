@@ -1,32 +1,42 @@
-# Lab Setup Instructions
+# RHT Lab SSH Connection Script
 
-> **Note:** Do not do this if you have already set a private key up before for a lab.
+A Bash script to automate SSH setup and connection to Red Hat Training lab environments.
 
-## Getting Started
+## Features (Planned)
 
-1. Click **CREATE** to spin up the lab environment
+- Automated SSH key setup and configuration
+- Secure connection handling through jump hosts
+- Environment variable support
+- Shell alias creation for quick connections
+- Cursor IDE integration
+- Status tracking and connection management
+- Known hosts management
 
-2. Click **DOWNLOAD SSH KEY** button when they're enabled (lab is running)
+## Project Structure (To Be Implemented)
 
-3. Open a terminal in your local machine
+```
+.
+├── src/
+│   ├── lib/
+│   │   ├── config.sh      # Configuration management
+│   │   ├── ssh.sh         # SSH operations
+│   │   ├── cursor.sh      # Cursor IDE integration
+│   │   └── utils.sh       # Utility functions
+│   └── main.sh            # Main script entry point
+├── tests/                 # Test files
+├── docs/                  # Documentation
+└── README.md             # This file
+```
 
-4. On your terminal, go to your ssh folder:
-   ```bash
-   cd ~/.ssh
-   ```
+## Development Status
 
-5. If it's not your first time doing this, you can skip this step and go to step 6.
+This project is currently under refactoring for improved:
+- Code organization and modularity
+- Error handling
+- Testing coverage
+- Documentation
+- Security practices
 
-6. Move the downloaded file to ~/.ssh, either with your files explorer or with the command line:
-   ```bash
-   mv ~/Downloads/rht_classroom.rsa ~/.ssh/
-   chmod 0600 ~/.ssh/rht_classroom.rsa
-   ssh-add ~/.ssh/rht_classroom.rsa
-   ```
+## License
 
-7. ssh into lab:
-   ```bash
-   ssh -i ~/.ssh/rht_classroom.rsa -J cloud-user@148.62.94.60:22022 student@172.25.252.1 -p 53009
-   ```
-
-You will be SSHing into the workstation VM as the student user. If you are asked for a password, use `student`
+MIT License - See LICENSE file for details
